@@ -1,0 +1,95 @@
+-   id: go-fmt
+    name: 'go fmt'
+    entry: run-go-fmt.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `gofmt`, requires golang"
+-   id: go-imports
+    name: 'go imports'
+    entry: run-go-imports.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `goimports`, requires golang"
+-   id: go-vet
+    name: 'go vet'
+    entry: run-go-vet.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go vet`, requires golang"
+-   id: go-lint
+    name: 'go lint'
+    entry: run-go-lint.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `golint`, requires https://github.com/golang/lint"
+-   id: go-cyclo
+    name: 'go-cyclo'
+    entry: run-go-cyclo.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `gocyclo`, requires https://github.com/fzipp/gocyclo"
+    args: [-over=15]
+-   id: validate-toml
+    name: 'validate toml'
+    entry: 'tomlv'
+    files: '\.toml$'
+    language: 'system'
+    description: >
+      Runs `tomlv`, requires https://github.com/BurntSushi/toml/tree/master/cmd/tomlv"
+-   id: 'no-go-testing'
+    name: "Check files aren't using go's testing package"
+    entry: 'testing\.T'
+    files: 'test_.*\.go$'
+    language: 'pygrep'
+    description: >
+      Checks that no files are using `testing.T`, if you want developers to use
+      a different testing framework
+-   id: gometalinter
+    name: 'gometalinter'
+    entry: run-gometalinter.sh
+    files: '\.go$'
+    language: 'script'
+    description: ""
+-   id: golangci-lint
+    name: 'golangci-lint'
+    entry: run-golangci-lint.sh
+    types: [go]
+    language: 'script'
+    pass_filenames: false
+    description: "Runs `golangci-lint`, requires https://github.com/golangci/golangci-lint"
+-   id: go-critic
+    name: 'go-critic'
+    entry: run-go-critic.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go-critic`, requires https://github.com/go-critic/go-critic"
+-   id: go-unit-tests
+    name: 'go-unit-tests'
+    entry: run-go-unit-tests.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go test`"
+-   id: go-build
+    name: 'go-build'
+    entry: run-go-build.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go build`, requires golang"
+-   id: go-generate
+    name: 'go-generate'
+    entry: run-go-generate.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go generate`, requires golang"
+-   id: go-mod-tidy
+    name: 'go-mod-tidy'
+    entry: run-go-mod-tidy.sh
+    pass_filenames: false
+    language: 'script'
+    description: "Runs `go mod tidy -v`, requires golang"
+-   id: go-mod-vendor
+    name: 'go-mod-vendor'
+    entry: run-go-mod-vendor.sh
+    files: '\.go$'
+    language: 'script'
+    description: "Runs `go mod vendor`, requires golang"
