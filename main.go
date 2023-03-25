@@ -45,11 +45,14 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"time"
 
+	etcdClient "go.etcd.io/etcd/client/v3"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 
 	// This is for thread safe queue
@@ -93,7 +96,6 @@ type ChangeStreamOperation struct {
 	// clusterTime  time.Time
 }
 
-
 var CurrentResumeToken string
 
 var _change_stream_lock bool = false
@@ -113,31 +115,34 @@ func isLocked() bool {
 }
 
 // Function to read data from mongodb
-func loadIntialData(coll *mongo.Collection, es *elasticsearch.Client, serviceConfig SericeConfig) {
+func loadIntialData(coll *mongo.Collection, es *elasticsearch.Client, serviceConfig SericeConfig, client *etcdClient.Client) {
 
 	// TODO: Need to write a failover for this part of the code
 	// how do I handle this for bulk of data?
 	// Assuming right now this part of the code runs without exceptions
 
-	// Check if the file named initial_data_loaded.lock exists
-	if _, err := os.Stat("initial_data_loaded.lock"); err == nil {
-		log.Println("Initial data already loaded")
-		releaseLock()
+	// Check status of inital data upload
+	if initStatus, err := client.Get(context.Background(), "mongo-es-init-stage"); err == nil {
+		if string(initStatus.Kvs[0].Value) == "done" {
+			log.Println("Initial data already loaded")
+			releaseLock()
+		}
 	} else if errors.Is(err, os.ErrNotExist) {
 
 		// Reacquiring the lock just in case
 		// Acquire lock
 		acquireLock()
 
+		value, err := client.Put(context.Background(), "mongo-es-init-stage", "running")
+		if err != nil {
+			log.Fatal(err)
+		} else {
+			log.Println(value)
+		}
+
 		var cursor *mongo.Cursor
 		var results []bson.M
-		// filter := bson.D{
-		// 	{"isDeleted", false},
-		// }
-		// sort := bson.D{
-		// 	{"createdAt", 1},
-		// 	// {"updatedAt", 1},
-		// }
+
 		opts := options.Find().SetSort(serviceConfig.Sort).SetProjection(serviceConfig.Project)
 		// Do I need to check if createAt exists?
 		cursor, find_err := coll.Find(context.TODO(), serviceConfig.Filter, opts)
@@ -155,11 +160,11 @@ func loadIntialData(coll *mongo.Collection, es *elasticsearch.Client, serviceCon
 			panic(err)
 		}
 		for _, result := range results {
-			// Make each request a goroutine : https://pkg.go.dev/github.com/elastic/go-elasticsearch#section-readme
+			// TODO: Make each request a goroutine : https://pkg.go.dev/github.com/elastic/go-elasticsearch#section-readme
 			res, _ := json.Marshal(result)
 
 			req := esapi.IndexRequest{
-				Index:      serviceConfig.EsIndexName,
+				Index: serviceConfig.EsIndexName,
 				// IMP: The Id of the docuemnt is used as unique identifier
 				DocumentID: result["id"].(primitive.ObjectID).Hex(),
 				Body:       bytes.NewReader(res),
@@ -182,6 +187,7 @@ func loadIntialData(coll *mongo.Collection, es *elasticsearch.Client, serviceCon
 				} else {
 					// Print the response status and indexed document version.
 					log.Printf("[%s] %s; version=%d", do_res.Status(), r["result"], int(r["_version"].(float64)))
+					client.Put(context.Background(), "mongo-es-init-state", string(result["id"].(primitive.ObjectID).Hex()))
 				}
 			}
 		}
@@ -190,24 +196,26 @@ func loadIntialData(coll *mongo.Collection, es *elasticsearch.Client, serviceCon
 		// TODO: Need to update like a redis or a etcd or something
 		// Writing this to a file for now, wont work when running in a container
 		// Create a file by the name initial_data_loaded.lock
-		_, err := os.Create("initial_data_loaded.lock")
-		if err != nil {
-			log.Fatal(err)
-		}
 
 		// Release lock
 		releaseLock()
+
+		d_value, d_err := client.Put(context.Background(), "mongo-es-init-stage", "done")
+		if err != nil {
+			log.Fatal(d_err)
+		} else {
+			log.Println(d_value)
+		}
 
 		log.Print("Uploaded the initial data!\n")
 	}
 	wg.Done()
 }
 
-
 // WARN: If ever this function is parallelized, then the lock needs to be handled properly
 // Updation of the resume token needs to be handled - https://docs.mongodb.com/manual/changeStreams/#change-stream-resume-token
 // Need to determine which event is latest when updating the resume token when parallelized - interesting problem
-func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, serviceConfig SericeConfig) {
+func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, serviceConfig SericeConfig, client *etcdClient.Client) {
 	for {
 		if isLocked() {
 			continue
@@ -277,21 +285,17 @@ func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, 
 				log.Println(s)
 				continue
 			}
-			// log.Println(cs_op.DocumentId.Hex())
-			// log.Println(reflect.TypeOf(res))
 			// This step is vv imp - took me a day to figure this out
 			res = []byte(`{"doc":` + string(res) + `}`)
-			// log.Println(string(res))
 
 			req := esapi.UpdateRequest{
 				Index:      serviceConfig.EsIndexName,
 				DocumentID: cs_op.DocumentId.Hex(),
-				Body: bytes.NewReader(res),
-				Refresh: "true",
+				Body:       bytes.NewReader(res),
+				Refresh:    "true",
 				// ErrorTrace: true,
 			}
 
-			log.Println(req.Header)
 
 			do_res, err := req.Do(context.Background(), es)
 			if err != nil {
@@ -328,10 +332,14 @@ func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, 
 		if cs_op.OperationType == "delete" {
 			log.Fatalln("Deleting the data from elastic search - FEATURE NOT IMPLEMENTED YET")
 		}
+
+		// Update the resume token in etcd
+		client.Put(context.Background(), "mongo-es-stream-resume-token", cs_op.ResumeToken)
+
 	}
 }
 
-func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfig SericeConfig) {
+func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfig SericeConfig, client *etcdClient.Client) {
 
 	queue := goconcurrentqueue.NewFIFO()
 
@@ -360,7 +368,7 @@ func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfi
 
 	defer cs.Close(context.TODO())
 
-	go uploadToElasticSearch(queue, es, serviceConfig)
+	go uploadToElasticSearch(queue, es, serviceConfig, client)
 
 	log.Println("Waiting For Change Events")
 	for cs.Next(context.TODO()) {
@@ -368,11 +376,11 @@ func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfi
 		if err := cs.Decode(&event); err != nil {
 			panic(err)
 		}
-		output, err := json.MarshalIndent(event, "", "    ")
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("%s\n", output)
+		// output, err := json.MarshalIndent(event, "", "    ")
+		// if err != nil {
+		// 	panic(err)
+		// }
+		// fmt.Printf("%s\n", output)
 
 		var each_request ChangeStreamOperation
 		// var u User
@@ -399,6 +407,7 @@ func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfi
 			continue
 		}
 		each_request.DocumentId, ok = event["documentKey"].(primitive.M)["_id"].(primitive.ObjectID)
+		each_request.ResumeToken = event["_id"].(primitive.M)["_data"].(string)
 
 		if event["operationType"] == "insert" {
 			each_request.FullDocument = event["fullDocument"].(primitive.M)
@@ -422,6 +431,35 @@ func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfi
 	wg.Done()
 }
 
+func etcdInit(client *etcdClient.Client) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	data, err := client.Get(ctx, "mongo-es-connector-state")
+	if err != nil {
+		// handle error!
+		// with etcd clientv3 <= v3.3
+		if err == context.Canceled {
+			// grpc balancer calls 'Get' with an inflight client.Close
+		} else if err == grpc.ErrClientConnClosing { // <= gRCP v1.7.x
+			// grpc balancer calls 'Get' after client.Close.
+		}
+		// with etcd clientv3 >= v3.4
+		if etcdClient.IsConnCanceled(err) {
+			// gRPC client connection is closed
+		}
+	}
+
+	cancel() // Should this be here?
+
+	if data.Kvs == nil {
+		log.Println("Init data not set in etcd")
+		return
+	} else {
+		log.Println(string(data.Kvs[0].Value))
+	}
+}
+
 func loadConfig(content_type string) *map[string]interface{} {
 	// cfg := make(map[interface{}]interface{})
 	// ChatGPT says this, what does it mean?
@@ -440,15 +478,14 @@ func loadConfig(content_type string) *map[string]interface{} {
 	}
 	defer cfgFile.Close()
 	byteValue, _ := ioutil.ReadAll(cfgFile)
-	// log.Println(string(byteValue))
-	// yaml.Unmarshal(byteValue, &cfg)
 	err = yaml.Unmarshal(byteValue, &cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
-	// log.Println(cfg[content_type])
-	// log.Println(reflect.TypeOf(cfg[content_type]))
-	// log.Println(len(cfg[content_type].(map[string]interface{})))
+	if cfg[content_type] == nil {
+		log.Fatal("No config found for content type:", content_type)
+		panic("No config found for content type:" + content_type)
+	}
 	x := cfg[content_type].(map[string]interface{})
 
 	return &x
@@ -473,6 +510,7 @@ func main() {
 	log.Println("Connecting to database:", dbName, "and collection:", collName)
 	instanceName := streamCfg["instanceName"].(string)
 	dataMapper := streamCfg["data"].(map[string]interface{}) // Why can I not convert this to map[string]string?
+	log.Println(dataMapper)
 	dataMapping := make(map[string]string)
 	for k, v := range dataMapper {
 		dataMapping[k] = v.(string)
@@ -534,7 +572,6 @@ func main() {
 		}
 	}
 
-	log.Println("))))3")
 	serverCfg := SericeConfig{
 		MongoDbUri:   uri,
 		MongoDbDb:    dbName,
@@ -558,12 +595,39 @@ func main() {
 	if find_err != nil {
 		panic(find_err)
 	}
+
+	client.Ping(context.TODO(), nil)
+	// response := client.Ping(context.TODO(), nil)
+	// log.Println(response)
+	// if err != nil {
+	// panic(err)
+	// }
+
 	// How does this work?
 	defer func() {
 		if err := client.Disconnect(context.TODO()); err != nil {
 			panic(err)
 		}
 	}()
+
+	// Connection to etcd
+	etcd, err := etcdClient.New(etcdClient.Config{
+		Endpoints:   []string{"http://localhost:2379"}, // TODO: Make this configurable
+		DialTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		// etcd clientv3 >= v3.2.10, grpc/grpc-go >= v1.7.3
+		if err == context.DeadlineExceeded {
+			// handle errors
+		}
+
+		// etcd clientv3 <= v3.2.9, grpc/grpc-go <= v1.2.1
+		if err == grpc.ErrClientConnTimeout {
+			// handle errors
+		}
+	}
+
+	etcdInit(etcd)
 
 	coll := client.Database(dbName).Collection(collName)
 
@@ -590,9 +654,9 @@ func main() {
 	wg.Add(2)
 
 	// This below function I can change it to be run on the main thread also - can I?
-	go watchChanges(coll, es, serverCfg)
+	go watchChanges(coll, es, serverCfg, etcd)
 	// Should I add a delay here just make sure the changes have started streaming?
-	go loadIntialData(coll, es, serverCfg)
+	go loadIntialData(coll, es, serverCfg, etcd)
 
 	wg.Wait()
 }
