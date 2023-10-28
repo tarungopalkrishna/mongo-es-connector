@@ -6,7 +6,6 @@ package main
 
 // How can I make this service distributed?
 /*
-CHATGPT:
 There are a few different ways you could ensure that only one replica of your service is streaming data from Mongo
 and updating Elasticsearch at a time when you scale up the replicas in Kubernetes:
 
@@ -32,6 +31,15 @@ and updating Elasticsearch at a time when you scale up the replicas in Kubernete
    multiple replicas of your service on the same node. This would ensure that only one replica would be
    running on each node, and therefore only one replica would be streaming data from Mongo and updating
    Elasticsearch.
+*/
+
+/*
+Things I wanna build
+1. Distributed implementation of this service : kubernetes: config - who owns what collection.
+2. Handle failed requests in esapi
+3. Resume token in a shared KV store
+4. delete deleted documents
+5. support local deployments of elastic search
 */
 
 import (
@@ -96,7 +104,6 @@ type ChangeStreamOperation struct {
     // Not supporting this as of now, will see in future releases
     // clusterTime  time.Time
 }
-
 
 // TODO: What are the downsides to storing this globally in go?
 var CurrentResumeToken string
@@ -172,6 +179,38 @@ func updateInIndex(req esapi.UpdateRequest, es *elasticsearch.Client, docId stri
         log.Println(do_res.HasWarnings())
         log.Println(do_res.Warnings())
         log.Printf("[%s] Error indexing document ID=%s", do_res.Status(), docId)
+        log.Println(do_res.Header)
+        return false
+    } else {
+        // Deserialize the response into a map.
+        var r map[string]interface{}
+        if err := json.NewDecoder(do_res.Body).Decode(&r); err != nil {
+            log.Printf("Error parsing the response body: %s", err)
+        } else {
+            // Print the response status and indexed document version.
+            log.Printf("[%s] %s; version=%d", do_res.Status(), r["result"], int(r["_version"].(float64)))
+        }
+        return true
+    }
+}
+
+func deleteInIndex(req esapi.DeleteRequest, es *elasticsearch.Client, docId string) bool {
+
+    do_res, err := req.Do(context.Background(), es)
+    if err != nil {
+        log.Fatalf("Error getting response: %s", err)
+    }
+    // TODO: understand what defer actually does
+    // Do not use defer in a loop, does not release the resources at the earliest
+    // I think I need to defer at the end of the loop
+    defer do_res.Body.Close()
+
+    if do_res.IsError() {
+        log.Println(do_res.String())
+        log.Println(do_res.Body)
+        log.Println(do_res.HasWarnings())
+        log.Println(do_res.Warnings())
+        log.Printf("[%s] Error deleting document ID=%s", do_res.Status(), docId)
         log.Println(do_res.Header)
         return false
     } else {
@@ -330,13 +369,12 @@ func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, 
             // }
 
             CurrentResumeToken = cs_op.ResumeToken
-        }
-        // For an update operation the following in returned
-        // Keys: ['_id', 'operationType', 'clusterTime', 'ns', 'documentKey', 'updateDescription']
-        // Update the data in elastic search
-        // Can raise an not found exception if the document is not found in elastic search
-        // elasticsearch.NotFoundError -> catch this
-        if cs_op.OperationType == "update" {
+        } else if cs_op.OperationType == "update" {
+            // For an update operation the following in returned
+            // Keys: ['_id', 'operationType', 'clusterTime', 'ns', 'documentKey', 'updateDescription']
+            // Update the data in elastic search
+            // Can raise an not found exception if the document is not found in elastic search
+            // elasticsearch.NotFoundError -> catch this
             log.Println("Updating the data in elastic search")
             // Update the data in elastic search
             log.Println(cs_op.FullDocument)
@@ -363,19 +401,31 @@ func uploadToElasticSearch(q *goconcurrentqueue.FIFO, es *elasticsearch.Client, 
             }
 
             // BUG: Why this here?
-            log.Println(req.Header)
+            // log.Println(req.Header)
 
             updateInIndex(req, es, string(cs_op.DocumentId.Hex()))
 
             CurrentResumeToken = cs_op.ResumeToken
+        } else if cs_op.OperationType == "delete" {
+            // For a delete operation the following is returned
+            // Keys: ['_id', 'operationType', 'clusterTime', 'ns', 'documentKey']
+            // Delete the data from elastic search
+            log.Println("Deleting data in elastic search")
+            // Delete data in elastic search
+            log.Println(cs_op.DocumentId)
 
-        }
+            req := esapi.DeleteRequest{
+                Index:      serviceConfig.EsIndexName,
+                DocumentID: cs_op.DocumentId.Hex(),
+                Refresh:    "true",
+                // ErrorTrace: true,
+            }
 
-        // For a delete operation the following in returned
-        // Keys: ['_id', 'operationType', 'clusterTime', 'ns', 'documentKey']
-        // Delete the data from elastic search
-        if cs_op.OperationType == "delete" {
-            log.Fatalln("Deleting the data from elastic search - FEATURE NOT IMPLEMENTED YET")
+            deleteInIndex(req, es, string(cs_op.DocumentId.Hex()))
+
+            CurrentResumeToken = cs_op.ResumeToken
+        } else {
+            log.Fatalln("Unsupported operation type: " + cs_op.OperationType)
         }
     }
 }
@@ -449,20 +499,17 @@ func watchChanges(coll *mongo.Collection, es *elasticsearch.Client, serviceConfi
         }
         each_request.DocumentId, ok = event["documentKey"].(primitive.M)["_id"].(primitive.ObjectID) // Am I typecasting here?
         if !ok {
-            log.Fatalln("Error while type asserting!")
+            log.Fatalln("Error while type asserting the document ID!")
             continue
         }
 
         if event["operationType"] == "insert" {
             each_request.FullDocument = event["fullDocument"].(primitive.M)
-        }
-        if event["operationType"] == "update" {
+        } else if event["operationType"] == "update" {
             each_request.FullDocument = event["fullDocument"].(primitive.M)
-        }
-        // TODO: Will handle this case later as it is currently not a feature in the database
-        if event["operationType"] == "delete" {
-            log.Print("Not handling delete events yet")
-            continue
+        } else if event["operationType"] == "delete" {
+        } else {
+            log.Fatalln("Unhandled operation type" + event["operationType"].(string))
         }
 
         // Add to queue
