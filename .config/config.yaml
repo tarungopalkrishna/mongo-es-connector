@@ -1,36 +1,16 @@
-InstanceNameToBeSetInEnvVar1:
-  instanceName: just an identifier, has no real use
-  database: DatabaseName
-  collection: CollectionName
+user:
+  instanceName: "User Type"
+  database: users
+  collection: m_user
+  truncateIndex: true
   data:
-    fieldNameInEs1: fieldNameinMongo1
-    fieldNameInEs2: fieldNameinMongo2
-    fieldNameInEs3: fieldNameinMongo3
-  filter:
-    fieldNameinMongo1: filterValue(acc to mongo docs)
+    _id: id
+    first_name: firstName
+    last_name : lastName
+    username: username
+  # filter:
+  #   isDeleted: false
   sort:
-    fieldNameinMongo1: sortValue(acc to mongo docs)
-InstanceNameToBeSetInEnvVar2:
-  instanceName: just an identifier, has no real use
-  database: DatabaseName
-  collection: CollectionName
-  data:
-    fieldNameInEs1: fieldNameinMongo1
-    fieldNameInEs2: fieldNameinMongo2
-    fieldNameInEs3: fieldNameinMongo3
-  filter:
-    fieldNameinMongo1: filterValue(acc to mongo docs)
-  sort:
-    fieldNameinMongo1: sortValue(acc to mongo docs)
-InstanceNameToBeSetInEnvVarN:
-  instanceName: just an identifier, has no real use
-  database: DatabaseName
-  collection: CollectionName
-  data:
-    fieldNameInEs1: fieldNameinMongo1
-    fieldNameInEs2: fieldNameinMongo2
-    fieldNameInEs3: fieldNameinMongo3
-  filter:
-    fieldNameinMongo1: filterValue(acc to mongo docs)
-  sort:
-    fieldNameinMongo1: sortValue(acc to mongo docs)
+    createdAt: -1
+
+

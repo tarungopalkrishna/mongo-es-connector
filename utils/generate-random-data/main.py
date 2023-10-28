@@ -22,7 +22,8 @@ from os import environ
 # log = logging.getLogger("user-simulator")
 # log.addHandler(logging.FileHandler("user-simulator.log"))
 
-LOG_LEVEL = logging.DEBUG
+# LOG_LEVEL = logging.DEBUG
+LOG_LEVEL = logging.INFO
 
 log = logging.getLogger("user-simulator")
 log.setLevel(LOG_LEVEL)
