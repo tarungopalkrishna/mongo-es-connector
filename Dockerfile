@@ -1,4 +1,5 @@
 # Build stage
+# TODO: move this over to alpine
 FROM golang:1.23.1 AS builder
 
 # Install dependencies
