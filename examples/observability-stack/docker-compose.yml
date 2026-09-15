@@ -179,6 +179,65 @@ services:
     command:
       - 'k6 run --env GRAPH_BYTES=$$(cat /shared/graph_bytes.txt) /scripts/submit_jobs.js'
 
+  # ----------------------------------------------------------------
+  # CPU-intensive workload variant
+  # ----------------------------------------------------------------
+  # Same submit-path machinery as the k6 profile, but each job runs a
+  # Source -> Map(cpu-burn) -> Sink pipeline that does configurable
+  # SHA-256 work per event. Use this to populate the
+  # wire_coordinator_job_duration_seconds histogram with realistic
+  # values (seconds, not microseconds) and to observe end-to-end
+  # in-system time under real CPU pressure.
+  #
+  # Run with:
+  #   docker compose --profile k6-cpu run --rm k6-cpu
+  # Tune the workload:
+  #   BURN_ROUNDS=100000 BURN_EVENTS=200 \
+  #     docker compose --profile k6-cpu run --rm k6-cpu
+
+  k6-cpu-graph-init:
+    image: wire:local
+    container_name: wire-k6-cpu-graph-init
+    profiles: ["k6-cpu"]
+    entrypoint: ["sh", "-c"]
+    environment:
+      BURN_ROUNDS: "${BURN_ROUNDS:-50000}"
+      BURN_EVENTS: "${BURN_EVENTS:-100}"
+      BURN_PAYLOAD: "${BURN_PAYLOAD:-64}"
+    command:
+      - 'print-cpuburn-graph --rounds "$$BURN_ROUNDS" --events "$$BURN_EVENTS" --payload-bytes "$$BURN_PAYLOAD" > /shared/graph_bytes.txt && echo "wrote cpuburn graph (rounds=$$BURN_ROUNDS events=$$BURN_EVENTS payload=$$BURN_PAYLOAD)"'
+    volumes:
+      - k6-shared:/shared
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  k6-cpu:
+    image: grafana/k6:0.54.0
+    container_name: wire-k6-cpu
+    profiles: ["k6-cpu"]
+    depends_on:
+      worker:
+        condition: service_started
+      coordinator:
+        condition: service_healthy
+      k6-cpu-graph-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./k6:/scripts:ro
+      - k6-shared:/shared:ro
+    environment:
+      WIRE_API: "http://coordinator:4001"
+      # Default RPS is much lower than the upper-pipeline test because
+      # each job now takes ~rounds * events * 500ns of CPU. At
+      # rounds=50000 / events=100 / 4 task slots, the worker drains
+      # ~1.6 jobs/s; submitting faster just queues CREATED.
+      RPS: "${RPS:-2}"
+      DURATION: "${DURATION:-2m}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'k6 run --env GRAPH_BYTES=$$(cat /shared/graph_bytes.txt) /scripts/submit_jobs.js'
+
 volumes:
   coordinator-data:
   prometheus-data:

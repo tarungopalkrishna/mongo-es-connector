@@ -31,6 +31,11 @@ RUN go build -o /out/submit-uppercase-job ./examples/submit-uppercase-job/.
 # request body with a real (msgpack-encoded) JobGraph.
 RUN go build -o /out/print-uppercase-graph ./examples/print-uppercase-graph/.
 
+# CPU-intensive variant — paired with the cpu-burn map operator the
+# wire-worker-example registers. Used by the k6-cpu profile for load
+# tests that exercise real per-job latency, not just submit-path cost.
+RUN go build -o /out/print-cpuburn-graph ./examples/print-cpuburn-graph/.
+
 #######################################################################
 FROM alpine:3.20
 
@@ -41,6 +46,7 @@ COPY --from=builder /out/wire /usr/local/bin/wire
 COPY --from=builder /out/wire-worker-example /usr/local/bin/wire-worker-example
 COPY --from=builder /out/submit-uppercase-job /usr/local/bin/submit-uppercase-job
 COPY --from=builder /out/print-uppercase-graph /usr/local/bin/print-uppercase-graph
+COPY --from=builder /out/print-cpuburn-graph /usr/local/bin/print-cpuburn-graph
 
 RUN mkdir -p /data
 VOLUME /data

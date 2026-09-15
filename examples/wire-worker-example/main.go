@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/tarungka/wire/internal/engine"
 	"github.com/tarungka/wire/internal/logger"
+	"github.com/tarungka/wire/internal/protocol"
 	"github.com/tarungka/wire/internal/worker"
 	"github.com/tarungka/wire/sdk/connectors/memory"
 )
@@ -46,6 +48,7 @@ func main() {
 	worker.RegisterSource("memory-source", memory.SourceFactory())
 	worker.RegisterSink("memory-sink", memory.SinkFactory())
 	worker.RegisterMap("upper", upperMapFactory())
+	worker.RegisterMap("cpu-burn", cpuBurnMapFactory())
 
 	w := worker.New(worker.Config{
 		WorkerID:        *workerID,
@@ -82,3 +85,60 @@ func (*upperMap) Map(_ context.Context, e engine.Event) (engine.Event, error) {
 }
 
 var _ engine.MapOperator = (*upperMap)(nil)
+
+// CPUBurnConfig is the msgpack payload understood by the cpu-burn map
+// operator. Rounds == 0 falls back to a sensible default so a graph
+// without explicit config still produces measurable work.
+type CPUBurnConfig struct {
+	Rounds uint32 `codec:"r"`
+}
+
+const defaultCPUBurnRounds = 50_000
+
+// cpuBurnMapFactory returns a MapFactory whose operator hashes each
+// event's value Rounds times in a tight SHA-256 loop. The loop is
+// data-dependent (each round hashes the previous hash) so the compiler
+// can't elide it. Used to build a CPU-intensive workload for load
+// testing — paired with print-cpuburn-graph.
+func cpuBurnMapFactory() worker.MapFactory {
+	return func(_ context.Context, cfgBytes []byte, _ worker.TaskContext) (engine.MapOperator, error) {
+		rounds := uint32(defaultCPUBurnRounds)
+		if len(cfgBytes) > 0 {
+			var cfg CPUBurnConfig
+			if err := protocol.DecodeMsgPack(cfgBytes, &cfg); err != nil {
+				return nil, fmt.Errorf("cpu-burn: decode config: %w", err)
+			}
+			if cfg.Rounds > 0 {
+				rounds = cfg.Rounds
+			}
+		}
+		return &cpuBurnMap{rounds: rounds}, nil
+	}
+}
+
+type cpuBurnMap struct {
+	rounds uint32
+}
+
+func (*cpuBurnMap) Open(_ context.Context) error        { return nil }
+func (*cpuBurnMap) Close() error                        { return nil }
+func (*cpuBurnMap) Checkpoint(_ uint64) ([]byte, error) { return nil, nil }
+func (m *cpuBurnMap) Map(ctx context.Context, e engine.Event) (engine.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return engine.Event{}, err
+	}
+	h := sha256.Sum256(e.Value)
+	for i := uint32(0); i < m.rounds; i++ {
+		// Bound cancellation latency without checking on every hash.
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return engine.Event{}, err
+			}
+		}
+		h = sha256.Sum256(h[:])
+	}
+	e.Value = h[:]
+	return e, nil
+}
+
+var _ engine.MapOperator = (*cpuBurnMap)(nil)
